@@ -1,19 +1,33 @@
+# bot.py — надежная версия с историей и проверками
+import os
 import telebot
 import random
 import time
 import json
 from datetime import datetime, timedelta
-import locale
-import os
 
-# Русская локаль для даты
-locale.setlocale(locale.LC_TIME, "ru_RU.UTF-8")
+# --- Настройки через env ---
+BOT_TOKEN = os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN")
+CHANNEL_ID = os.getenv("CHANNEL_ID")  # например "@my_channel" или "-1001234567890"
+SLEEP_SECONDS = int(os.getenv("SLEEP_SECONDS", "180"))  # можно временно поставить 5 для теста
+HISTORY_FILE = "used_combinations.json"
+HISTORY_DAYS = int(os.getenv("HISTORY_DAYS", "30"))
 
-TOKEN = "YOUR_BOT_TOKEN"  # Вставь свой токен
-CHANNEL_ID = "@your_channel"  # Юзернейм канала
-bot = telebot.TeleBot(TOKEN)
+if not BOT_TOKEN:
+    raise SystemExit("Ошибка: переменная окружения BOT_TOKEN (или TELEGRAM_TOKEN) не задана.")
+if not CHANNEL_ID:
+    raise SystemExit("Ошибка: переменная окружения CHANNEL_ID не задана (например @my_channel или -1001234567890).")
 
-# === Шаблоны прогнозов ===
+bot = telebot.TeleBot(BOT_TOKEN)
+
+# --- Месяцы для русского формата даты (без зависимостей) ---
+MONTHS = {
+    1: "января", 2: "февраля", 3: "марта", 4: "апреля",
+    5: "мая", 6: "июня", 7: "июля", 8: "августа",
+    9: "сентября", 10: "октября", 11: "ноября", 12: "декабря"
+}
+
+# --- Шаблоны (сокращённо — можно расширить) ---
 start_phrases = [
     "Сегодняшние события могут подсказать,", "В этот день проявится тенденция, что",
     "Энергии суток дают сигнал о том,", "Наступающий день принесёт ощущение, что",
@@ -62,11 +76,11 @@ end_phrases = [
     "ведя к внутреннему обновлению."
 ]
 
-# === Карты Таро (78) ===
+# --- Полная колода (78 карт) ---
 tarot_cards = [
     "Шут — новые начинания, свобода", "Маг — сила воли, мастерство", "Верховная Жрица — интуиция, тайны",
     "Императрица — изобилие, забота", "Император — порядок, власть", "Иерофант — традиции, обучение",
-    "Влюблённые — выбор, гармония", "Колесница — движение, победа", "Сила — внутренняя стойкость, мужество",
+    "Влюблённые — выбор, гармония", "Колесница — движение, победа", "Сила — внутреняя стойкость, мужество",
     "Отшельник — поиск истины, уединение", "Колесо Фортуны — перемены, судьба", "Справедливость — баланс, честность",
     "Повешенный — переоценка, новые взгляды", "Смерть — трансформация, конец и начало", "Умеренность — гармония, терпение",
     "Дьявол — искушения, зависимости", "Башня — разрушение, освобождение", "Звезда — надежда, вдохновение",
@@ -93,6 +107,7 @@ tarot_cards = [
     "Королева Пентаклей — забота, уют", "Король Пентаклей — стабильность, достаток"
 ]
 
+# --- Знаки и совместимость ---
 signs = [
     "♈️ Овен", "♉️ Телец", "♊️ Близнецы", "♋️ Рак",
     "♌️ Лев", "♍️ Дева", "♎️ Весы", "♏️ Скорпион",
@@ -121,59 +136,101 @@ focus_options = [
     "Внутренний баланс", "Отношения и дружба", "Смелые решения"
 ]
 
-# === Файл для хранения использованных комбинаций ===
-HISTORY_FILE = "used_combinations.json"
-HISTORY_DAYS = 30  # Храним 30 дней
-
+# --- История: загрузка/сохранение с очисткой старых записей ---
 def load_history():
-    if os.path.exists(HISTORY_FILE):
+    if not os.path.exists(HISTORY_FILE):
+        return set()
+    try:
         with open(HISTORY_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            cutoff = datetime.now() - timedelta(days=HISTORY_DAYS)
-            return set(tuple(item["combo"]) for item in data if datetime.fromisoformat(item["date"]) > cutoff)
-    return set()
+            raw = json.load(f)
+        cutoff = datetime.now() - timedelta(days=HISTORY_DAYS)
+        out = set()
+        for item in raw:
+            try:
+                combo = tuple(item["combo"])
+                date = datetime.fromisoformat(item["date"])
+                if date > cutoff:
+                    out.add(combo)
+            except Exception:
+                continue
+        return out
+    except Exception:
+        # если файл повреждён — перезаписываем пустой историей
+        return set()
 
 def save_history(history):
-    data = [{"combo": list(combo), "date": datetime.now().isoformat()} for combo in history]
+    data = [{"combo": list(c), "date": datetime.now().isoformat()} for c in history]
     with open(HISTORY_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 used_combinations = load_history()
 
-def generate_prediction():
+# --- Уникальная генерация ---
+def generate_prediction_text():
     return f"{random.choice(start_phrases)} {random.choice(middle_phrases)} {random.choice(end_phrases)}"
 
-def generate_post(sign):
-    while True:
-        prediction = generate_prediction()
+def generate_unique_combo():
+    attempts = 0
+    while attempts < 2000:
+        prediction = generate_prediction_text()
         card = random.choice(tarot_cards)
         focus = random.choice(focus_options)
         combo = (prediction, card, focus)
         if combo not in used_combinations:
             used_combinations.add(combo)
             save_history(used_combinations)
-            break
+            return prediction, card, focus
+        attempts += 1
+    # если все варианты исчерпаны или слишком много попыток — очистим старые и продолжим
+    used_combinations.clear()
+    save_history(used_combinations)
+    # повторно взять
+    prediction = generate_prediction_text()
+    card = random.choice(tarot_cards)
+    focus = random.choice(focus_options)
+    combo = (prediction, card, focus)
+    used_combinations.add(combo)
+    save_history(used_combinations)
+    return prediction, card, focus
 
-    sign_name = sign.split(" ")[1]
-    today = datetime.now().strftime("%-d %B")
+# --- Проверка доступа к каналу перед отправкой ---
+def assert_channel_access():
+    try:
+        bot.get_chat(CHANNEL_ID)
+    except Exception as e:
+        raise SystemExit(f"Ошибка доступа к каналу: {e}\nПроверь: правильно ли CHANNEL_ID и добавлен ли бот в канал (и админ?).")
 
-    text = f"""{sign}, {today}
+# --- Формат даты как '7 ноября' ---
+def russian_date():
+    now = datetime.now()
+    return f"{now.day} {MONTHS[now.month]}"
 
-💡 Прогноз: {prediction}
-
-🎴 Карта дня: {card}
-
-🎯 Фокус дня: {focus}
-💞 Совместимость: {compatibility[sign_name]}
-
-🔮 <a href="https://t.me/+QIQFGYWwkLhiYjFi">Научный гороскоп</a>"""
-    return text
-
+# --- Главная отправка ---
 def main():
+    print("Проверяю доступ к каналу...")
+    assert_channel_access()
+    print("Доступ в канал OK. Начинаю генерацию и отправку...")
     for sign in signs:
-        post = generate_post(sign)
-        bot.send_message(CHANNEL_ID, post, parse_mode="HTML", disable_web_page_preview=True)
-        time.sleep(180)  # 3 минуты между постами
+        prediction, card, focus = generate_unique_combo()
+        # sign уже содержит emoji + название: "♍️ Дева"
+        date_str = russian_date()
+        sign_name = sign.split(" ")[1]  # "Дева"
+        compatibility_text = compatibility.get(sign_name, "")
+        text = (
+            f"{sign}, {date_str}\n\n"
+            f"💡 Прогноз: {prediction}\n\n"
+            f"🎴 Карта дня: {card}\n\n"
+            f"🎯 Фокус дня: {focus}\n"
+            f"💞 Совместимость: {compatibility_text}\n\n"
+            f"🔮 <a href=\"https://t.me/+QIQFGYWwkLhiYjFi\">Научный гороскоп</a>"
+        )
+        try:
+            bot.send_message(CHANNEL_ID, text, parse_mode="HTML", disable_web_page_preview=True)
+            print(f"Отправлено для {sign} — карта: {card} — фокус: {focus}")
+        except Exception as e:
+            print(f"Ошибка при отправке для {sign}: {e}")
+        time.sleep(SLEEP_SECONDS)
+    print("Готово — все гороскопы отправлены.")
 
 if __name__ == "__main__":
     main()
